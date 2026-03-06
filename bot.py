@@ -36,7 +36,7 @@ m5_buffers: dict[str, pd.DataFrame] = {}
 
 # Deduplicate signals: track last signal time per symbol
 last_signal: dict[str, datetime] = {}
-SIGNAL_COOLDOWN_MINUTES = 15
+SIGNAL_COOLDOWN_MINUTES = 10  # optimized from sweep (10-bar cooldown)
 
 # Track active order IDs → signal mapping for logging
 active_orders: dict[str, dict] = {}

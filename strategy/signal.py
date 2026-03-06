@@ -37,8 +37,8 @@ def generate_signal(
     m5_df: pd.DataFrame,
     m1_df: pd.DataFrame,
     mss_lookback:  int = 50,
-    fvg_lookback:  int = 30,
-    swing_length:  int = 5,
+    fvg_lookback:  int = 30,   # optimized: 30
+    swing_length:  int = 7,    # optimized: 7 (was 5)
     min_gap_pct:   float = 0.05,
 ) -> Signal | None:
     """

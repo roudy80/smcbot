@@ -61,12 +61,23 @@ def simulate_trades(
         print(f"  [backtest] {symbol}: not enough bars")
         return trades
 
+    # Build a mapping from M1 timestamp → M5 slice index so we can
+    # pass only past M5 bars to generate_signal at each step (no lookahead).
+    m5_times = m5_df.index
+    m1_times = m1_df.index
+
     for i in range(15, len(m1_df) - 1):
         if i - last_signal_bar < cooldown_bars:
             continue
 
-        m1_window = m1_df.iloc[:i + 1]  # only up to current bar (no lookahead)
-        sig = generate_signal(symbol=symbol, m5_df=m5_df, m1_df=m1_window)
+        current_m1_time = m1_times[i]
+        # Only use M5 bars whose timestamp <= current M1 bar
+        m5_window = m5_df[m5_df.index <= current_m1_time]
+        if len(m5_window) < 20:
+            continue
+
+        m1_window = m1_df.iloc[:i + 1]
+        sig = generate_signal(symbol=symbol, m5_df=m5_window, m1_df=m1_window)
         if sig is None:
             continue
 

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import pandas as pd
 
-from strategy.fvg import find_unfilled_fvgs
+from strategy.fvg import find_actionable_fvgs
 from strategy.mss import get_recent_mss
 import config
 
@@ -59,8 +59,9 @@ def generate_signal(
     if mss is None:
         return None
 
-    # Step 2: Find M1 FVGs aligned with the M5 MSS direction
-    fvgs = find_unfilled_fvgs(m1_df, lookback=fvg_lookback)
+    # Step 2: Find M1 FVGs that are actionable RIGHT NOW (price is in the zone,
+    # gap not fully violated), aligned with M5 MSS direction.
+    fvgs = find_actionable_fvgs(m1_df, lookback=fvg_lookback)
     aligned = [f for f in fvgs if f["direction"] == mss["direction"]]
     if not aligned:
         return None
@@ -68,22 +69,7 @@ def generate_signal(
     # Use the most recent aligned FVG
     fvg = aligned[-1]
 
-    # Step 3: Check if current M1 price is at or inside the FVG zone
-    # (price has returned to the gap — this is the entry trigger)
-    last_m1 = m1_df.iloc[-1]
-    current_price = last_m1["close"]
-
-    in_bull_zone = (fvg["direction"] == "bull"
-                    and current_price <= fvg["top"]
-                    and current_price >= fvg["bot"])
-    in_bear_zone = (fvg["direction"] == "bear"
-                    and current_price >= fvg["bot"]
-                    and current_price <= fvg["top"])
-
-    if not (in_bull_zone or in_bear_zone):
-        return None
-
-    # Step 4: Calculate entry, SL, TP
+    # Step 3: Calculate entry, SL, TP
     direction = "long" if fvg["direction"] == "bull" else "short"
     entry     = fvg["midpoint"]
     sl_dist   = entry * (config.STOP_LOSS_PCT / 100)

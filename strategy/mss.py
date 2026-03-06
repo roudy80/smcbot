@@ -68,14 +68,8 @@ def detect_mss(df: pd.DataFrame, swing_length: int = 5) -> pd.DataFrame:
     last_swing_low_idx    = None
 
     for i in range(swing_length, n):
-        # Update most recent swing points (only from confirmed past candles)
-        if df.iloc[i]["swing_high"]:
-            last_swing_high_price = highs[i]
-            last_swing_high_idx   = i
-
-        if df.iloc[i]["swing_low"]:
-            last_swing_low_price = lows[i]
-            last_swing_low_idx   = i
+        # Check MSS BEFORE updating swing state — a bar can both be a new
+        # swing point AND break the previous one; we want to catch the break.
 
         # Bullish MSS: current close breaks above last swing high
         if (last_swing_high_price is not None
@@ -94,6 +88,15 @@ def detect_mss(df: pd.DataFrame, swing_length: int = 5) -> pd.DataFrame:
             df.iloc[i, df.columns.get_loc("mss_bear")]  = True
             df.iloc[i, df.columns.get_loc("mss_level")] = last_swing_low_price
             last_swing_low_price = None  # consumed, reset
+
+        # Update swing state AFTER MSS check
+        if df.iloc[i]["swing_high"]:
+            last_swing_high_price = highs[i]
+            last_swing_high_idx   = i
+
+        if df.iloc[i]["swing_low"]:
+            last_swing_low_price = lows[i]
+            last_swing_low_idx   = i
 
     return df
 

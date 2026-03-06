@@ -68,38 +68,96 @@ def detect_fvg(df: pd.DataFrame, min_gap_pct: float = 0.05) -> pd.DataFrame:
     return df
 
 
-def find_unfilled_fvgs(df: pd.DataFrame, lookback: int = 50) -> list[dict]:
+def find_actionable_fvgs(df: pd.DataFrame, lookback: int = 50) -> list[dict]:
     """
-    Return list of FVGs from the last `lookback` candles that have NOT been
-    filled (price has not re-entered the gap zone).
+    Return FVGs that are valid entry zones for the current bar.
 
-    An FVG is "filled" when a subsequent candle's range overlaps the gap.
+    A FVG is actionable when:
+      - It was confirmed at least 2 bars ago (i.e. not the current candle)
+      - It has NOT been fully violated (price closed fully through the gap)
+      - The current bar (last row) is AT or INSIDE the FVG zone
+
+    "Fully violated" means a subsequent candle CLOSED beyond the far side
+    of the gap — a mere wick touch is not a violation (price can still bounce).
+    This matches real SMC entry logic where the FVG zone remains valid until
+    price closes through it.
     """
-    fvg_df = detect_fvg(df)
-    unfilled = []
+    fvg_df  = detect_fvg(df)
+    window  = fvg_df.iloc[-lookback:]
+    current = window.iloc[-1]
+    results = []
 
-    # Only look at the lookback window
-    window = fvg_df.iloc[-lookback:]
-
-    for idx in range(len(window) - 1):
+    # Exclude last 2 rows — FVG needs candle[i+1] confirmed, so we can only
+    # evaluate up to index len-2
+    for idx in range(len(window) - 2):
         row = window.iloc[idx]
         if not (row["fvg_bull"] or row["fvg_bear"]):
             continue
 
         top = row["fvg_top"]
         bot = row["fvg_bot"]
-        filled = False
+        is_bull = bool(row["fvg_bull"])
+        violated = False
 
-        # Check all candles AFTER this FVG candle
+        # Check candles between FVG and current for full violation
+        for future_idx in range(idx + 1, len(window) - 1):
+            future = window.iloc[future_idx]
+            if is_bull:
+                # Bullish FVG violated if a candle CLOSES below the bottom
+                if future["close"] < bot:
+                    violated = True
+                    break
+            else:
+                # Bearish FVG violated if a candle CLOSES above the top
+                if future["close"] > top:
+                    violated = True
+                    break
+
+        if violated:
+            continue
+
+        # Check current bar is touching or inside the FVG zone
+        in_zone = current["low"] <= top and current["high"] >= bot
+        if not in_zone:
+            continue
+
+        results.append({
+            "timestamp": window.index[idx],
+            "direction": "bull" if is_bull else "bear",
+            "top":       top,
+            "bot":       bot,
+            "midpoint":  (top + bot) / 2,
+        })
+
+    return results
+
+
+def find_unfilled_fvgs(df: pd.DataFrame, lookback: int = 50) -> list[dict]:
+    """
+    Return FVGs that price has not yet re-entered at all.
+    Useful for identifying nearby untapped liquidity zones.
+    """
+    fvg_df  = detect_fvg(df)
+    window  = fvg_df.iloc[-lookback:]
+    results = []
+
+    for idx in range(len(window) - 2):
+        row = window.iloc[idx]
+        if not (row["fvg_bull"] or row["fvg_bear"]):
+            continue
+
+        top = row["fvg_top"]
+        bot = row["fvg_bot"]
+        touched = False
+
         for future_idx in range(idx + 1, len(window)):
             future = window.iloc[future_idx]
-            # Filled if future candle's range enters the gap
             if future["low"] <= top and future["high"] >= bot:
-                filled = True
+                touched = True
                 break
 
-        if not filled:
-            unfilled.append({
+        if not touched:
+            results.append({
                 "timestamp": window.index[idx],
                 "direction": "bull" if row["fvg_bull"] else "bear",
                 "top":       top,
@@ -107,4 +165,4 @@ def find_unfilled_fvgs(df: pd.DataFrame, lookback: int = 50) -> list[dict]:
                 "midpoint":  (top + bot) / 2,
             })
 
-    return unfilled
+    return results

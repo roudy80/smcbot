@@ -37,6 +37,11 @@ def load_logs():
     if not f.exists(): return []
     return [json.loads(l) for l in f.read_text().strip().split("\n") if l.strip()]
 
+def load_crypto_logs():
+    f = Path("logs/crypto_trades.jsonl")
+    if not f.exists(): return []
+    return [json.loads(l) for l in f.read_text().strip().split("\n") if l.strip()]
+
 
 def load_watchlist():
     f = Path("logs/watchlist.json")
@@ -168,9 +173,46 @@ def build_page():
     if not trade_rows:
         trade_rows = '<tr><td colspan="5" style="text-align:center;color:#8b949e;padding:16px">No closed trades yet</td></tr>'
 
-    eq_labels_js = json.dumps(eq_labels)
-    eq_vals_js   = json.dumps(eq_vals)
-    now          = datetime.now().strftime("%b %d %I:%M:%S %p")
+    # --- Crypto section ---
+    crypto_records = load_crypto_logs()
+    c_trades  = [r for r in crypto_records if r["event"] == "close"]
+    c_signals = [r for r in crypto_records if r["event"] == "signal"]
+    c_wins    = [t for t in c_trades if t.get("outcome") == "win"]
+    c_losses  = [t for t in c_trades if t.get("outcome") == "loss"]
+    c_pnl     = sum(t.get("pnl", 0) for t in c_trades)
+    c_wr      = round(len(c_wins)/len(c_trades)*100,1) if c_trades else 0
+    c_pnl_s, c_pnl_c = fmt_pnl(c_pnl)
+
+    crypto_positions = [p for p in positions
+                        if any(p.get("symbol","").startswith(c) for c in ["BTC","ETH","SOL"])]
+
+    c_pos_rows = ""
+    for p in crypto_positions:
+        unrl = float(p.get("unrealized_pl",0))
+        ps,pc = fmt_pnl(unrl)
+        c_pos_rows += f"<tr><td><b>{p.get('symbol')}</b></td><td>{p.get('side','').upper()}</td><td>${float(p.get('market_value',0)):,.2f}</td><td style='color:{pc}'>{ps}</td></tr>"
+    if not c_pos_rows:
+        c_pos_rows = '<tr><td colspan="4" style="text-align:center;color:#8b949e;padding:12px">No open crypto positions</td></tr>'
+
+    c_sig_rows = ""
+    for s in c_signals[-6:][::-1]:
+        dc = "#2ecc71" if s.get("direction")=="long" else "#e74c3c"
+        c_sig_rows += f"<tr><td>{s.get('ts','')[:16]}</td><td><b>{s.get('symbol','')}</b></td><td style='color:{dc}'>{s.get('direction','').upper()}</td><td>${s.get('entry',0):,.2f}</td><td>${s.get('notional',0):.0f} notional</td></tr>"
+    if not c_sig_rows:
+        c_sig_rows = '<tr><td colspan="5" style="text-align:center;color:#8b949e;padding:12px">No crypto signals yet</td></tr>'
+
+    # Crypto equity curve
+    ceq, ceq_labels, ceq_vals = 0, [], []
+    for t in c_trades:
+        ceq += t.get("pnl",0)
+        ceq_labels.append(t["ts"][:16])
+        ceq_vals.append(round(ceq,2))
+
+    eq_labels_js  = json.dumps(eq_labels)
+    eq_vals_js    = json.dumps(eq_vals)
+    ceq_labels_js = json.dumps(ceq_labels)
+    ceq_vals_js   = json.dumps(ceq_vals)
+    now           = datetime.now().strftime("%b %d %I:%M:%S %p")
 
     return f"""<!DOCTYPE html>
 <html><head>
@@ -247,9 +289,34 @@ a{{color:#58a6ff}}
 </div>
 
 <div class="sect">
-<h2>Trade History</h2>
+<h2>Trade History — Stocks</h2>
 <table><thead><tr><th>Time</th><th>Symbol</th><th>Dir</th><th>Result</th><th>P&amp;L</th></tr></thead>
 <tbody>{trade_rows}</tbody></table>
+</div>
+
+<hr style="border-color:#30363d;margin:24px 0">
+
+<div class="sect">
+<h2 style="color:#f39c12">Crypto Trading — BTC / ETH (24/7)</h2>
+<div class="grid" style="margin-bottom:12px">
+  <div class="card"><div class="val" style="color:{c_pnl_c}">{c_pnl_s}</div><div class="lbl">Crypto P&amp;L</div></div>
+  <div class="card"><div class="val">{c_wr}%</div><div class="lbl">Crypto Win Rate</div></div>
+  <div class="card"><div class="val">{len(c_trades)}</div><div class="lbl">Crypto Trades</div></div>
+  <div class="card"><div class="val">{len(c_signals)}</div><div class="lbl">Crypto Signals</div></div>
+</div>
+<div class="chart-box" style="height:160px"><canvas id="ceq"></canvas></div>
+</div>
+
+<div class="sect">
+<h2>Crypto Positions</h2>
+<table><thead><tr><th>Symbol</th><th>Side</th><th>Value</th><th>Unreal P&amp;L</th></tr></thead>
+<tbody>{c_pos_rows}</tbody></table>
+</div>
+
+<div class="sect">
+<h2>Crypto Signals</h2>
+<table><thead><tr><th>Time</th><th>Symbol</th><th>Dir</th><th>Entry</th><th>Size</th></tr></thead>
+<tbody>{c_sig_rows}</tbody></table>
 </div>
 
 <script>
@@ -264,6 +331,21 @@ new Chart(document.getElementById('eq'),{{
     plugins:{{legend:{{display:false}}}},
     scales:{{
       x:{{ticks:{{color:'#8b949e',maxTicksLimit:5}},grid:{{color:'#21262d'}}}},
+      y:{{ticks:{{color:'#8b949e',callback:v=>'$'+v}},grid:{{color:'#21262d'}}}}
+    }}
+  }}
+}});
+new Chart(document.getElementById('ceq'),{{
+  type:'line',
+  data:{{labels:{ceq_labels_js},datasets:[{{
+    label:'Crypto P&L ($)',data:{ceq_vals_js},
+    borderColor:'#f39c12',backgroundColor:'#f39c1218',
+    fill:true,tension:0.3,pointRadius:2,borderWidth:2
+  }}]}},
+  options:{{responsive:true,maintainAspectRatio:false,
+    plugins:{{legend:{{display:false}}}},
+    scales:{{
+      x:{{ticks:{{color:'#8b949e',maxTicksLimit:4}},grid:{{color:'#21262d'}}}},
       y:{{ticks:{{color:'#8b949e',callback:v=>'$'+v}},grid:{{color:'#21262d'}}}}
     }}
   }}

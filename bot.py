@@ -23,6 +23,8 @@ import schedule
 import config
 import logger
 import notify
+from strategy.fvg import find_unfilled_fvgs
+from strategy.mss import get_recent_mss as _get_mss
 from analyze import run_analysis
 from execution import broker, risk
 from feeds.historical import fetch
@@ -41,6 +43,9 @@ SIGNAL_COOLDOWN_MINUTES = 10  # optimized from sweep (10-bar cooldown)
 # Track active order IDs → signal mapping for logging
 active_orders: dict[str, dict] = {}
 
+# M1 buffers per symbol (separate from M5)
+m1_buffers: dict[str, pd.DataFrame] = {}
+
 
 def is_market_hours() -> bool:
     now = datetime.now(ET).time()
@@ -57,15 +62,50 @@ def seed_historical_buffers():
         print(f"[bot] {symbol}: {len(m5_buffers[symbol])} M5 bars loaded")
 
 
+def update_watchlist():
+    """Write upcoming FVG zones to logs/watchlist.json for the dashboard."""
+    import json
+    from pathlib import Path
+    zones = []
+    for symbol in config.SYMBOLS:
+        m5 = m5_buffers.get(symbol)
+        m1_buf = m1_buffers.get(symbol)
+        if m5 is None or m1_buf is None or len(m1_buf) < 10:
+            continue
+        try:
+            mss = _get_mss(m5, lookback=50, swing_length=7)
+            fvgs = find_unfilled_fvgs(m1_buf, lookback=30)
+            current_price = float(m1_buf.iloc[-1]["close"])
+            for fvg in fvgs:
+                dist_pct = (fvg["midpoint"] - current_price) / current_price * 100
+                zones.append({
+                    "symbol":    symbol,
+                    "direction": fvg["direction"],
+                    "top":       round(fvg["top"], 4),
+                    "bot":       round(fvg["bot"], 4),
+                    "midpoint":  round(fvg["midpoint"], 4),
+                    "dist_pct":  round(dist_pct, 3),
+                    "mss_dir":   mss["direction"] if mss else "none",
+                })
+        except Exception:
+            pass
+    zones.sort(key=lambda z: abs(z["dist_pct"]))
+    Path("logs").mkdir(exist_ok=True)
+    Path("logs/watchlist.json").write_text(json.dumps(zones[:20], indent=2))
+
+
 def on_bar_closed(symbol: str, timeframe: str, df: pd.DataFrame):
     """
     Called by LiveFeed on every closed bar.
     Only act on M1 bars during market hours.
     """
     if timeframe == "5Min":
-        # Keep M5 buffer updated for MSS context
         m5_buffers[symbol] = df
         return
+
+    if timeframe == "1Min":
+        m1_buffers[symbol] = df
+        update_watchlist()
 
     if timeframe != "1Min":
         return

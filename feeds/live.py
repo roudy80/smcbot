@@ -1,94 +1,98 @@
 """
-Live WebSocket feed using alpaca-py.
-Aggregates real-time bar updates and maintains a rolling OHLCV buffer
-for both M1 and M5 timeframes per symbol.
+Live feed using polling instead of WebSocket.
+Fetches latest bars via yfinance every 60 seconds.
+Avoids Alpaca's free-tier WebSocket connection limit entirely.
 
-The `on_bar_closed` callback is invoked with (symbol, timeframe, df)
-each time a new closed bar is available — this is the hook that triggers
-signal generation in bot.py.
+The on_bar_closed callback fires whenever a new M1 or M5 bar
+is detected since the last poll.
 """
 
-import asyncio
-from collections import defaultdict
-from datetime import datetime, timezone
+import time
+import threading
+from datetime import datetime, timedelta
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 import pandas as pd
-from alpaca.data.live import StockDataStream
+import yfinance as yf
 
 import config
+
+ET = ZoneInfo("America/New_York")
+POLL_INTERVAL = 60  # seconds between polls
 
 
 class LiveFeed:
     def __init__(self, on_bar_closed: Callable):
-        """
-        Args:
-            on_bar_closed: Callable(symbol: str, timeframe: str, df: pd.DataFrame)
-                           Called whenever a new M1 or M5 bar closes.
-        """
-        self._on_bar_closed = on_bar_closed
-        self._stream        = StockDataStream(
-            api_key    = config.ALPACA_API_KEY,
-            secret_key = config.ALPACA_SECRET_KEY,
-        )
+        self._callback  = on_bar_closed
+        self._running   = False
+        self._thread    = None
 
-        # Rolling buffers: {symbol: {"1Min": df, "5Min": df}}
-        self._buffers: dict[str, dict[str, pd.DataFrame]] = defaultdict(
-            lambda: {"1Min": pd.DataFrame(), "5Min": pd.DataFrame()}
-        )
+        # Track the last bar timestamp seen per symbol+timeframe
+        self._last_seen: dict[str, pd.Timestamp] = {}
 
-        # M5 aggregation state: {symbol: list_of_m1_bars_in_current_5min_window}
-        self._m5_pending: dict[str, list] = defaultdict(list)
+        # Rolling buffers
+        self._buffers: dict[str, dict[str, pd.DataFrame]] = {
+            s: {"1Min": pd.DataFrame(), "5Min": pd.DataFrame()}
+            for s in config.SYMBOLS
+        }
 
-        self._stream.subscribe_bars(self._handle_bar, *config.SYMBOLS)
+    def _fetch_latest(self, symbol: str, interval: str, period: str) -> pd.DataFrame:
+        try:
+            df = yf.download(symbol, period=period, interval=interval,
+                             auto_adjust=True, progress=False, threads=False)
+            if df.empty:
+                return pd.DataFrame()
+            df.columns = [c.lower() if isinstance(c, str) else c[0].lower()
+                          for c in df.columns]
+            df = df[["open", "high", "low", "close", "volume"]]
+            df.index = pd.to_datetime(df.index, utc=True)
+            # Drop the last (potentially incomplete) bar
+            return df.iloc[:-1]
+        except Exception as e:
+            print(f"[feed] fetch error {symbol} {interval}: {e}")
+            return pd.DataFrame()
 
-    async def _handle_bar(self, bar):
-        """
-        Alpaca streams M1 bars. We:
-        1. Append to M1 buffer → fire on_bar_closed("1Min")
-        2. Accumulate into M5 buffer → fire on_bar_closed("5Min") every 5 bars
-        """
-        symbol = bar.symbol
-        ts     = pd.Timestamp(bar.timestamp, tz="UTC")
+    def _poll(self):
+        print(f"[feed] Polling {'  '.join(config.SYMBOLS)} every {POLL_INTERVAL}s")
+        while self._running:
+            now_et = datetime.now(ET)
 
-        new_row = pd.DataFrame([{
-            "open":   bar.open,
-            "high":   bar.high,
-            "low":    bar.low,
-            "close":  bar.close,
-            "volume": bar.volume,
-        }], index=[ts])
+            for symbol in config.SYMBOLS:
+                # --- M1 ---
+                m1 = self._fetch_latest(symbol, "1m", "1d")
+                if not m1.empty:
+                    key = f"{symbol}_1Min"
+                    last = self._last_seen.get(key)
+                    new_bars = m1[m1.index > last] if last is not None else m1.iloc[-5:]
+                    if not new_bars.empty:
+                        buf = pd.concat([self._buffers[symbol]["1Min"], new_bars]).tail(200)
+                        self._buffers[symbol]["1Min"] = buf
+                        self._last_seen[key] = m1.index[-1]
+                        self._callback(symbol, "1Min", buf.copy())
 
-        # --- M1 buffer ---
-        m1 = self._buffers[symbol]["1Min"]
-        m1 = pd.concat([m1, new_row]).tail(200)  # keep last 200 M1 bars
-        self._buffers[symbol]["1Min"] = m1
-        self._on_bar_closed(symbol, "1Min", m1.copy())
+                # --- M5 ---
+                m5 = self._fetch_latest(symbol, "5m", "5d")
+                if not m5.empty:
+                    key = f"{symbol}_5Min"
+                    last = self._last_seen.get(key)
+                    new_bars = m5[m5.index > last] if last is not None else m5.iloc[-5:]
+                    if not new_bars.empty:
+                        buf = pd.concat([self._buffers[symbol]["5Min"], new_bars]).tail(100)
+                        self._buffers[symbol]["5Min"] = buf
+                        self._last_seen[key] = m5.index[-1]
+                        self._callback(symbol, "5Min", buf.copy())
 
-        # --- M5 aggregation ---
-        pending = self._m5_pending[symbol]
-        pending.append(new_row)
-
-        # A new M5 bar closes every time the minute is :00, :05, :10, etc.
-        if ts.minute % 5 == 4:  # 4th minute of each 5-min window closes the bar
-            m5_bar = pd.DataFrame([{
-                "open":   pending[0]["open"].iloc[0],
-                "high":   max(r["high"].iloc[0] for r in pending),
-                "low":    min(r["low"].iloc[0]  for r in pending),
-                "close":  pending[-1]["close"].iloc[0],
-                "volume": sum(r["volume"].iloc[0] for r in pending),
-            }], index=[pending[-1].index[0]])
-
-            m5 = self._buffers[symbol]["5Min"]
-            m5 = pd.concat([m5, m5_bar]).tail(100)  # keep last 100 M5 bars
-            self._buffers[symbol]["5Min"] = m5
-            self._m5_pending[symbol] = []
-            self._on_bar_closed(symbol, "5Min", m5.copy())
+            # Sleep in 5s increments so stop() is responsive
+            for _ in range(POLL_INTERVAL // 5):
+                if not self._running:
+                    break
+                time.sleep(5)
 
     def run(self):
-        """Start the blocking event loop."""
-        print(f"[feed] Starting live stream for: {config.SYMBOLS}")
-        self._stream.run()
+        """Start polling loop (blocking)."""
+        self._running = True
+        self._poll()
 
     def stop(self):
-        self._stream.stop()
+        self._running = False

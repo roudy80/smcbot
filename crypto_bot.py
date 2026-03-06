@@ -34,7 +34,11 @@ CRYPTO_LOG.parent.mkdir(exist_ok=True)
 m5_buffers: dict[str, pd.DataFrame] = {}
 m1_buffers: dict[str, pd.DataFrame] = {}
 last_signal: dict[str, datetime]    = {}
-COOLDOWN_SECONDS = 600  # 10 minutes between signals per symbol
+COOLDOWN_SECONDS = 3600  # 1 hour between signals (crypto needs patience)
+
+# Crypto-specific risk params (wider than stocks — BTC moves 1-2% routinely)
+CRYPTO_SL_PCT = 1.5   # 1.5% stop loss vs 0.5% for stocks
+CRYPTO_RR     = 2.0   # keep 1:2 RR
 
 
 def log(record: dict):
@@ -48,13 +52,15 @@ def load_crypto_logs() -> list[dict]:
 
 
 def on_bar_closed(symbol: str, timeframe: str, df: pd.DataFrame):
-    if timeframe == "5Min":
-        m5_buffers[symbol] = df
+    # Crypto uses 1H for trend (MSS) + 15Min for entry (FVG)
+    # Much less noise than 1Min/5Min on BTC/ETH
+    if timeframe == "1H":
+        m5_buffers[symbol] = df   # reuse m5_buffers for 1H trend data
         return
-    if timeframe == "1Min":
-        m1_buffers[symbol] = df
+    if timeframe == "15Min":
+        m1_buffers[symbol] = df   # reuse m1_buffers for 15Min entry data
 
-    if timeframe != "1Min":
+    if timeframe != "15Min":
         return
 
     # Kill switch check
@@ -80,7 +86,8 @@ def on_bar_closed(symbol: str, timeframe: str, df: pd.DataFrame):
 
     sig = generate_signal(
         symbol=symbol, m5_df=m5, m1_df=m1,
-        mss_lookback=50, fvg_lookback=30, swing_length=7,
+        mss_lookback=50, fvg_lookback=20, swing_length=5,
+        min_gap_pct=0.10,  # higher bar for crypto FVG quality
     )
     if sig is None:
         return
@@ -133,13 +140,13 @@ def run_scheduler():
 
 
 def seed_buffers():
-    print("[crypto] Seeding historical buffers...")
+    print("[crypto] Seeding historical buffers (1H trend + 15Min entry)...")
     for symbol in config.CRYPTO_SYMBOLS:
         try:
-            m5_buffers[symbol] = fetch_crypto(symbol, "5Min", days=5)
-            m1_buffers[symbol] = fetch_crypto(symbol, "1Min", days=1)
-            print(f"[crypto] {symbol}: {len(m5_buffers[symbol])} M5 bars, "
-                  f"{len(m1_buffers[symbol])} M1 bars")
+            m5_buffers[symbol] = fetch_crypto(symbol, "1H",   days=14)
+            m1_buffers[symbol] = fetch_crypto(symbol, "15Min", days=3)
+            print(f"[crypto] {symbol}: {len(m5_buffers[symbol])} 1H bars, "
+                  f"{len(m1_buffers[symbol])} 15Min bars")
         except Exception as e:
             print(f"[crypto] seed error {symbol}: {e}")
 

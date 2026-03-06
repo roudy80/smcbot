@@ -31,6 +31,8 @@ def fetch_crypto(symbol: str, timeframe: str, days: int = 3) -> pd.DataFrame:
         "1Min":  TimeFrame(1,  TimeFrameUnit.Minute),
         "5Min":  TimeFrame(5,  TimeFrameUnit.Minute),
         "15Min": TimeFrame(15, TimeFrameUnit.Minute),
+        "1H":    TimeFrame(1,  TimeFrameUnit.Hour),
+        "4H":    TimeFrame(4,  TimeFrameUnit.Hour),
     }
     req = CryptoBarsRequest(
         symbol_or_symbols=symbol,
@@ -53,15 +55,16 @@ class CryptoFeed:
         self._running  = False
         self._last_seen: dict[str, pd.Timestamp] = {}
         self._buffers: dict[str, dict] = {
-            s: {"1Min": pd.DataFrame(), "5Min": pd.DataFrame()}
+            s: {"15Min": pd.DataFrame(), "1H": pd.DataFrame()}
             for s in symbols
         }
 
     def _poll(self):
         print(f"[crypto] Polling {self._symbols} every {POLL_INTERVAL}s (24/7)")
+        print(f"[crypto] Timeframes: 15Min (entry) + 1H (trend context)")
         while self._running:
             for symbol in self._symbols:
-                for tf, days in [("1Min", 1), ("5Min", 3)]:
+                for tf, days in [("15Min", 3), ("1H", 14)]:
                     try:
                         df = fetch_crypto(symbol, tf, days=days)
                         if df.empty:

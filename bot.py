@@ -27,6 +27,7 @@ from strategy.fvg import find_unfilled_fvgs
 from strategy.mss import get_recent_mss as _get_mss
 from analyze import run_analysis
 from execution import broker, risk
+from execution.position_monitor import PositionMonitor
 from feeds.historical import fetch
 from feeds.live import LiveFeed
 from strategy.signal import generate_signal
@@ -45,6 +46,13 @@ active_orders: dict[str, dict] = {}
 
 # M1 buffers per symbol (separate from M5)
 m1_buffers: dict[str, pd.DataFrame] = {}
+
+# Partial TP monitor
+_monitor = PositionMonitor(
+    get_client_fn=broker.get_client,
+    notify_fn=notify._send,
+    label="stocks-monitor",
+)
 
 
 def is_market_hours() -> bool:
@@ -159,6 +167,7 @@ def on_bar_closed(symbol: str, timeframe: str, df: pd.DataFrame):
         logger.log_signal(sig, qty, order_id)
         notify.order_placed(symbol, sig.direction, qty, sig.entry, sig.stop_loss, sig.take_profit)
         print(f"[bot] Order placed: {order_id} {sig.direction} {symbol} x{qty}")
+        _monitor.track(symbol, sig.entry, sig.stop_loss, sig.take_profit, qty, sig.direction)
     except Exception as e:
         notify.error_alert(f"Order failed {symbol}: {e}")
         print(f"[bot] Order error: {e}")
@@ -228,6 +237,9 @@ def main():
     # Background scheduler (EOD tasks, etc.)
     scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
     scheduler_thread.start()
+
+    # Partial TP / break-even stop monitor
+    _monitor.start()
 
     # Graceful shutdown
     def shutdown(sig, frame):

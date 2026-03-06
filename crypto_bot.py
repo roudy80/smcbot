@@ -22,8 +22,10 @@ import config
 import notify
 from feeds.crypto import CryptoFeed, fetch_crypto
 from execution.crypto_broker import (
-    get_account_value, crypto_position_size, place_crypto_bracket, close_crypto_positions
+    get_account_value, crypto_position_size, place_crypto_bracket,
+    close_crypto_positions, get_client as get_crypto_client,
 )
+from execution.position_monitor import PositionMonitor
 from strategy.signal import generate_signal
 from execution.risk import check_kill_switch, init_daily_tracker, is_killed
 
@@ -39,6 +41,12 @@ COOLDOWN_SECONDS = 3600  # 1 hour between signals (crypto needs patience)
 # Crypto-specific risk params (wider than stocks — BTC moves 1-2% routinely)
 CRYPTO_SL_PCT = 1.5   # 1.5% stop loss vs 0.5% for stocks
 CRYPTO_RR     = 2.0   # keep 1:2 RR
+
+_monitor = PositionMonitor(
+    get_client_fn=get_crypto_client,
+    notify_fn=notify._send,
+    label="crypto-monitor",
+)
 
 
 def log(record: dict):
@@ -112,6 +120,8 @@ def on_bar_closed(symbol: str, timeframe: str, df: pd.DataFrame):
         })
         notify.order_placed(symbol, sig.direction, f"${notional:.0f} notional",
                             sig.entry, sig.stop_loss, sig.take_profit)
+        _monitor.track(symbol.replace("/", ""), sig.entry, sig.stop_loss,
+                       sig.take_profit, notional, sig.direction)
     except Exception as e:
         print(f"[crypto] Order failed {symbol}: {e}")
         notify.error_alert(f"Crypto order failed {symbol}: {e}")
@@ -171,6 +181,7 @@ def main():
     )
 
     threading.Thread(target=run_scheduler, daemon=True).start()
+    _monitor.start()
 
     def shutdown(sig, frame):
         print("\n[crypto] Shutting down...")

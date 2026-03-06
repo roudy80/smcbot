@@ -16,7 +16,7 @@ TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 # Strategy — stocks
-SYMBOLS            = [s.strip() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")]
+SYMBOLS            = [s.strip() for s in os.getenv("SYMBOLS", "SPY,QQQ,NVDA,AAPL,MSFT").split(",")]
 DAILY_LOSS_LIMIT   = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "3.0"))   # percent
 RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", "1.0"))     # percent
 RR_RATIO           = float(os.getenv("RR_RATIO", "2.0"))
